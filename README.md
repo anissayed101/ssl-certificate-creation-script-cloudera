@@ -31,8 +31,6 @@ It is useful when:
 ```text
 .
 ├── csr-generation.sh      # Generate key and CSR locally without SSH
-├── csr-generation.sh            # Generate key and CSR using SSH mode
-├── inventory.txt        # Example host inventory for SSH mode
 └── inventory.txt               # Example host inventory for non-SSH/local CSR generation
 ```
 
@@ -43,7 +41,7 @@ It is useful when:
 For CSR generation without SSH, use:
 
 ```bash
-./csr-generation.sh
+sh -x csr-generation.sh inventory.txt 
 ```
 
 This script runs fully on the local machine and generates the private key and CSR on behalf of the target server.
