@@ -30,10 +30,10 @@ It is useful when:
 
 ```text
 .
-├── generate-local-cert.sh      # Generate key and CSR locally without SSH
-├── generate_cert.sh            # Generate key and CSR using SSH mode
-├── hosts_production.txt        # Example host inventory for SSH mode
-└── non-local.txt               # Example host inventory for non-SSH/local CSR generation
+├── csr-generation.sh      # Generate key and CSR locally without SSH
+├── csr-generation.sh            # Generate key and CSR using SSH mode
+├── inventory.txt        # Example host inventory for SSH mode
+└── inventory.txt               # Example host inventory for non-SSH/local CSR generation
 ```
 
 ---
@@ -43,7 +43,7 @@ It is useful when:
 For CSR generation without SSH, use:
 
 ```bash
-./generate-local-cert.sh
+./csr-generation.sh
 ```
 
 This script runs fully on the local machine and generates the private key and CSR on behalf of the target server.
@@ -224,14 +224,14 @@ which tr
 Before running the script, provide execute permission:
 
 ```bash
-chmod +x generate-local-cert.sh
+chmod +x csr-generation.sh
 ```
 
 ---
 
 ## Host File Format
 
-Create or update a host file using the following format:
+Create or update a inventory file using the following format:
 
 ```text
 fqdn|ip|extra_sans
@@ -257,16 +257,16 @@ server1.test.local|10.10.10.11|DNS:server1,DNS:server1-alias.test.local,IP:10.10
 
 ## How to Run
 
-Run the script with the host file as input:
+Run the script with the inventory file as input:
 
 ```bash
-./generate-local-cert.sh non-local.txt
+./csr-generation.sh inventory.txt
 ```
 
 Example:
 
 ```bash
-./generate-local-cert.sh hosts.txt
+./csr-generation.sh inventory.txt
 ```
 
 ---
@@ -337,7 +337,7 @@ rm -f /tmp/auto-tls/keys/key.pwd
 Then rerun the script:
 
 ```bash
-./generate-local-cert.sh non-local.txt
+./csr-generation.sh inventory.txt
 ```
 
 ---
@@ -384,7 +384,7 @@ Example:
 DNS:server1.test.local,DNS:server1,IP:10.10.10.11
 ```
 
-Additional SANs can be added in the third column of the host file.
+Additional SANs can be added in the third column of the inventory file.
 
 Example:
 
@@ -474,17 +474,17 @@ rm -rf /tmp/auto-tls/server1.test.local
 Then run the script again:
 
 ```bash
-./generate-local-cert.sh non-local.txt
+./csr-generation.sh inventory.txt
 ```
 
 ---
 
 ## Example End-to-End Usage
 
-Create a host file:
+Create a inventory file:
 
 ```bash
-vi non-local.txt
+vi inventory.txt
 ```
 
 Add sample hosts:
@@ -498,13 +498,13 @@ server3.test.local|10.10.10.13|
 Make the script executable:
 
 ```bash
-chmod +x generate-local-cert.sh
+chmod +x csr-generation.sh
 ```
 
 Run the script:
 
 ```bash
-./generate-local-cert.sh non-local.txt
+./csr-generation.sh inventory.txt
 ```
 
 Validate one CSR:
@@ -574,7 +574,7 @@ key.pwd
 .idea/
 ```
 
-Only commit the scripts and sanitized sample host files.
+Only commit the scripts and sanitized sample inventory files.
 
 Avoid committing real client hostnames, IP addresses, keys, CSRs, or certificates to GitHub.
 
@@ -607,8 +607,8 @@ server3.test.local|10.10.10.13|
 Also update sample files such as:
 
 ```text
-hosts_production.txt
-non-local.txt
+inventory.txt
+inventory.txt
 ```
 
 Replace any real values with generic examples:
@@ -654,7 +654,7 @@ Confirm the allowed key size with the organization’s security or certificate p
 - The CSR is generated using the target server FQDN and IP address.
 - The certificate returned by the Certificate Authority must be installed together with the matching private key.
 - The private key must remain protected and should not be shared publicly.
-- The host file should contain only approved internal hostnames and IP addresses.
+- The inventory file should contain only approved internal hostnames and IP addresses.
 - Avoid committing real client hostnames, IP addresses, keys, CSRs, or certificates to GitHub.
 
 ---
