@@ -1,46 +1,33 @@
 #!/usr/bin/env bash
 # =============================================================================
-# csr-generation.sh
-# Cloudera CDP Auto-TLS — Per-Node CSR & Key Generation (SSH Mode)
+# generate_csr_local.sh
+# Generate private key + CSR locally on THIS host on behalf of any server
 #
 # PURPOSE:
-#   SSHes into each host, generates the RSA private key and CSR locally ON
-#   THAT HOST, then copies both files back to the Cloudera Manager host into
-#   a per-hostname folder under /tmp/auto-tls/.
-#
-# REFERENCE:
-#   https://docs.cloudera.com/cdp-private-cloud-base/latest/security-encrypting-data-in-transit/topics/cm-security-use-case-4.html
-#
-# FIPS NOTE:
-#   For FIPS-enabled clusters, RSA key size MUST be 2048 or 3072.
-#   RSA 4096 is not FIPS-approved. Change KEY_BITS below accordingly.
-#
-# PREREQUISITES:
-#   - Passwordless SSH from this host to all cluster nodes
-#   - openssl installed on all remote hosts
-#   - Run as the user that owns the SSH key
+#   Runs entirely on the CM host (utility2). No SSH, no remote access needed.
+#   Use this for servers you cannot SSH into:
+#     - Informatica Staging (Linux, no SSH)
+#     - ERwin Production (Windows)
+#     - Any other server
 #
 # USAGE:
-#   ./csr-generation.sh <inventory_file>
+#   ./generate_csr_local.sh <hosts_file>
 #
-# INVENTORY FILE FORMAT (pipe-delimited, one host per line):
+# HOSTS FILE FORMAT (pipe-delimited):
 #   fqdn|ip|extra_sans
 #
-#   extra_sans is optional and comma-separated:
-#     cdp-master1.cloudera.test.local|10.10.10.11|
-#     cdp-Cloudera Manager host.cloudera.test.local|10.10.10.12|DNS:cloudera-manager.cloudera.test.local
+#   Examples:
+#     cdp-master1.cloudera.bbi|192.168.113.131|
+#     server2.example.local|10.10.10.12|
 #
-#   Blank lines and lines starting with # are ignored.
+# OUTPUT:
+#   /tmp/auto-tls/<fqdn>/
+#     <fqdn>-key.pem   <- private key (encrypted)
+#     <fqdn>.csr       <- CSR to submit to CA
+#   /tmp/auto-tls/keys/key.pwd
 #
-# OUTPUT STRUCTURE ON CM HOST:
-#   /tmp/auto-tls/
-#   ├── keys/
-#   │   └── key.pwd
-#   ├── cdp-master1.cloudera.test.local/
-#   │   ├── cdp-master1.cloudera.test.local-key.pem
-#   │   └── cdp-master1.cloudera.test.local.csr
-#   └── ... (one folder per host, exactly 2 files each)
-#
+# FIPS NOTE:
+#   FIPS clusters must use rsa:2048 or rsa:3072. Change KEY_BITS below.
 # =============================================================================
 set -euo pipefail
 
@@ -49,12 +36,12 @@ set -euo pipefail
 # =============================================================================
 
 CERT_C="AE"
-CERT_ST="State"
-CERT_L="City"
-CERT_O="Example Organization"
-CERT_OU="IT"
+CERT_ST="Dubai"
+CERT_L="Dubai"
+CERT_O="BBI"
+CERT_OU=""
 
-# Key size — 4096 for non-FIPS. FIPS clusters: use 2048 or 3072.
+# 4096 for non-FIPS. FIPS clusters: use 2048 or 3072.
 KEY_BITS=4096
 DIGEST="sha256"
 CERT_DAYS=365
@@ -63,10 +50,6 @@ BASE_DIR="/tmp/auto-tls"
 KEY_PWD_DIR="${BASE_DIR}/keys"
 KEY_PWD_FILE="${KEY_PWD_DIR}/key.pwd"
 PWD_LENGTH=32
-
-SSH_USER="cloudera"
-SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10"
-REMOTE_TMP="/tmp/autotls-gen"
 
 # =============================================================================
 # COLOUR HELPERS
@@ -81,14 +64,15 @@ warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 section() { echo -e "\n${BOLD}${CYAN}>>> $* ${RESET}"; }
 
+
 # =============================================================================
 # PREREQUISITES
 # =============================================================================
 
 check_prerequisites() {
-    section "Checking local prerequisites"
+    section "Checking prerequisites"
     local missing=0
-    for cmd in openssl ssh scp cut tr sed grep; do
+    for cmd in openssl cut tr grep sed find sort head; do
         if command -v "${cmd}" &>/dev/null; then
             ok "Found: ${cmd}"
         else
@@ -109,36 +93,33 @@ check_prerequisites() {
 
 validate_args() {
     if [[ $# -ne 1 ]]; then
-        error "Usage: $0 <inventory_file>"
+        error "Usage: $0 <hosts_file>"
         echo ""
         echo "  Format: fqdn|ip|extra_sans"
-        echo "  Example:"
-        echo "    cdp-master1.cloudera.test.local|10.10.10.11|"
-        echo "    cdp-Cloudera Manager host.cloudera.test.local|10.10.10.12|DNS:cloudera-manager.cloudera.test.local"
+        echo "  Examples:"
+        echo "    cdp-master1.cloudera.bbi|192.168.113.131|"
+        echo "    server2.example.local|10.10.10.12|"
         exit 1
     fi
-    INVENTORY_FILE="$1"
-    if [[ ! -f "${INVENTORY_FILE}" ]]; then
-        error "Inventory file not found: ${INVENTORY_FILE}"
-        exit 1
-    fi
-    if [[ ! -r "${INVENTORY_FILE}" ]]; then
-        error "Inventory file not readable: ${INVENTORY_FILE}"
+    HOSTS_FILE="$1"
+    if [[ ! -f "${HOSTS_FILE}" ]]; then
+        error "Hosts file not found: ${HOSTS_FILE}"
         exit 1
     fi
 }
 
 # =============================================================================
-# KEY PASSWORD
+# KEY PASSWORD — reuse existing key.pwd if present so all certs share one
 # =============================================================================
 
 setup_key_password() {
-    section "Setting up shared key password (on CM host)"
+    section "Setting up shared key password"
     mkdir -p "${KEY_PWD_DIR}"
     chmod 700 "${KEY_PWD_DIR}"
 
     if [[ -f "${KEY_PWD_FILE}" ]]; then
-        warn "key.pwd already exists — reusing. Delete ${KEY_PWD_FILE} to regenerate."
+        warn "key.pwd already exists — reusing existing passphrase."
+        warn "  All keys will use: ${KEY_PWD_FILE}"
     else
         info "Generating random passphrase (${PWD_LENGTH} chars)..."
         openssl rand -base64 48 \
@@ -153,7 +134,6 @@ setup_key_password() {
 
 # =============================================================================
 # PARSE HOST LINE
-# Populates globals: PARSED_FQDN, PARSED_IP, PARSED_EXTRA
 # =============================================================================
 
 parse_host_line() {
@@ -163,85 +143,26 @@ parse_host_line() {
     PARSED_EXTRA=$(echo "${raw_line}" | cut -d'|' -f3 | tr -d '[:space:]')
 
     if [[ -z "${PARSED_FQDN}" ]]; then
-        error "Empty FQDN in line: ${raw_line}"
-        return 1
+        error "Empty FQDN in line: ${raw_line}"; return 1
     fi
     if [[ -z "${PARSED_IP}" ]]; then
-        error "Empty IP for host '${PARSED_FQDN}'"
-        return 1
+        error "Empty IP for host '${PARSED_FQDN}'"; return 1
     fi
     if ! echo "${PARSED_FQDN}" | \
          grep -qE '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'; then
-        error "Invalid FQDN: ${PARSED_FQDN}"
-        return 1
+        error "Invalid FQDN: ${PARSED_FQDN}"; return 1
     fi
     if ! echo "${PARSED_IP}" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-        error "Invalid IP: ${PARSED_IP} (host: ${PARSED_FQDN})"
-        return 1
+        error "Invalid IP: ${PARSED_IP}"; return 1
     fi
     return 0
 }
 
 
-# =============================================================================
-# SSH TEST
-# =============================================================================
-
-test_ssh() {
-    local host="$1"
-    if ssh ${SSH_OPTS} "${SSH_USER}@${host}" "echo ssh-ok" &>/dev/null; then
-        return 0
-    fi
-    return 1
-}
 
 # =============================================================================
-# BUILD REMOTE SCRIPT — all values pre-substituted locally, no variable
-# quoting issues crossing the SSH boundary.
+# GENERATE KEY + CSR LOCALLY ON BEHALF OF THE TARGET HOST
 # =============================================================================
-
-build_remote_script() {
-    local fqdn="$1"
-    local san_string="$2"
-    local subject="$3"
-    local tmpfile
-    tmpfile=$(mktemp /tmp/autotls-remote-XXXXXX.sh)
-
-    cat > "${tmpfile}" << REMOTE_EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-REMOTE_TMP="${REMOTE_TMP}"
-REMOTE_KEY="${REMOTE_TMP}/${fqdn}-key.pem"
-REMOTE_CSR="${REMOTE_TMP}/${fqdn}.csr"
-REMOTE_PWD="${REMOTE_TMP}/key.pwd"
-
-openssl req \\
-    -newkey    "rsa:${KEY_BITS}" \\
-    -${DIGEST} \\
-    -days      "${CERT_DAYS}" \\
-    -keyout    "\${REMOTE_KEY}" \\
-    -out       "\${REMOTE_CSR}" \\
-    -passout   "file:\${REMOTE_PWD}" \\
-    -subj      "${subject}" \\
-    -reqexts san \\
-    -config <( printf '[req]\ndistinguished_name=req\nreq_extensions=san\n[san]\nsubjectAltName=${san_string}\nextendedKeyUsage=serverAuth,clientAuth\n' ) \\
-    2>/dev/null
-
-chmod 600 "\${REMOTE_KEY}"
-chmod 644 "\${REMOTE_CSR}"
-echo "DONE"
-REMOTE_EOF
-
-    chmod 600 "${tmpfile}"
-    echo "${tmpfile}"
-}
-
-# =============================================================================
-# PER-HOST PROCESSING
-# =============================================================================
-
-FAILED_HOSTS=()
 
 generate_for_host() {
     local fqdn="$1"
@@ -249,11 +170,8 @@ generate_for_host() {
     local extra_sans="$3"
 
     local host_dir="${BASE_DIR}/${fqdn}"
-    local local_key="${host_dir}/${fqdn}-key.pem"
-    local local_csr="${host_dir}/${fqdn}.csr"
-    local remote_key="${REMOTE_TMP}/${fqdn}-key.pem"
-    local remote_csr="${REMOTE_TMP}/${fqdn}.csr"
-    local remote_script_path="${REMOTE_TMP}/gen.sh"
+    local key_file="${host_dir}/${fqdn}-key.pem"
+    local csr_file="${host_dir}/${fqdn}.csr"
 
     local short_name
     short_name=$(echo "${fqdn}" | cut -d'.' -f1)
@@ -263,21 +181,14 @@ generate_for_host() {
     info "  Short name  : ${short_name}"
     info "  Extra SANs  : ${extra_sans:-<none>}"
 
-    # Skip if already collected
-    if [[ -f "${local_key}" ]] && [[ -f "${local_csr}" ]]; then
-        warn "Already collected for ${fqdn} — skipping. Remove ${host_dir}/ to regenerate."
+    # Skip if already done
+    if [[ -f "${key_file}" ]] && [[ -f "${csr_file}" ]]; then
+        warn "Already exists — skipping. Remove ${host_dir}/ to regenerate."
         return 0
     fi
 
-    # SSH connectivity check
-    info "  Testing SSH connectivity..."
-    if ! test_ssh "${fqdn}"; then
-        error "Cannot SSH to ${fqdn} as ${SSH_USER} — skipping."
-        error "  Check: ssh ${SSH_USER}@${fqdn}"
-        FAILED_HOSTS+=("${fqdn}")
-        return 0
-    fi
-    ok "  SSH OK"
+    mkdir -p "${host_dir}"
+    chmod 700 "${host_dir}"
 
     # Build SAN string
     local san_string="DNS:${fqdn},DNS:${short_name},IP:${ip}"
@@ -285,98 +196,80 @@ generate_for_host() {
         san_string="${san_string},${extra_sans}"
     fi
 
-    # Build subject — assembled locally, never passed as a variable over SSH
-    local subject="/C=${CERT_C}/ST=${CERT_ST}/L=${CERT_L}/O=${CERT_O}/OU=${CERT_OU}/CN=${fqdn}"
+    local subject="/C=${CERT_C}/ST=${CERT_ST}/L=${CERT_L}/O=${CERT_O}"
+
+    if [[ -n "${CERT_OU}" ]]; then
+        subject="${subject}/OU=${CERT_OU}"
+    fi
+
+    subject="${subject}/CN=${fqdn}"
 
     info "  SANs        : ${san_string}"
     info "  Subject     : ${subject}"
+    info "  Generating ${KEY_BITS}-bit RSA key + CSR locally..."
 
- # ------------------------------------------------------------------
-    # STEP 1: Prepare remote tmp dir and copy key.pwd
-    # ------------------------------------------------------------------
-    info "  Preparing remote host..."
-    ssh ${SSH_OPTS} "${SSH_USER}@${fqdn}" "mkdir -p ${REMOTE_TMP} && chmod 700 ${REMOTE_TMP}"
-    scp -q ${SSH_OPTS} "${KEY_PWD_FILE}" "${SSH_USER}@${fqdn}:${REMOTE_TMP}/key.pwd"
-    ssh ${SSH_OPTS} "${SSH_USER}@${fqdn}" "chmod 600 ${REMOTE_TMP}/key.pwd"
+    openssl req \
+        -newkey    "rsa:${KEY_BITS}" \
+        -"${DIGEST}" \
+        -days      "${CERT_DAYS}" \
+        -keyout    "${key_file}" \
+        -out       "${csr_file}" \
+        -passout   "file:${KEY_PWD_FILE}" \
+        -subj      "${subject}" \
+        -reqexts   san \
+        -config <(
+            printf '[req]\ndistinguished_name=req\nreq_extensions=san\n[san]\nsubjectAltName=%s\nextendedKeyUsage=serverAuth,clientAuth\n' \
+                   "${san_string}"
+        ) \
+        2>/dev/null
 
-    # ------------------------------------------------------------------
-    # STEP 2: Build and SCP the generation script (values pre-substituted)
-    # ------------------------------------------------------------------
-    local local_script
-    local_script=$(build_remote_script "${fqdn}" "${san_string}" "${subject}")
-    scp -q ${SSH_OPTS} "${local_script}" "${SSH_USER}@${fqdn}:${remote_script_path}"
-    ssh ${SSH_OPTS} "${SSH_USER}@${fqdn}" "chmod 700 ${remote_script_path}"
-    rm -f "${local_script}"
+    chmod 600 "${key_file}"
+    chmod 644 "${csr_file}"
 
-    # ------------------------------------------------------------------
-    # STEP 3: Execute generation script on remote host
-    # ------------------------------------------------------------------
-    info "  Generating ${KEY_BITS}-bit RSA key + CSR on ${fqdn}..."
-    local result
-    result=$(ssh ${SSH_OPTS} "${SSH_USER}@${fqdn}" "bash ${remote_script_path}")
+    ok "  Key : ${key_file}"
+    ok "  CSR : ${csr_file}"
 
-    if [[ "${result}" != "DONE" ]]; then
-        error "Remote generation failed on ${fqdn}. Output: ${result}"
-        FAILED_HOSTS+=("${fqdn}")
-        ssh ${SSH_OPTS} "${SSH_USER}@${fqdn}" "rm -rf ${REMOTE_TMP}" || true
-        return 0
-    fi
-    ok "  Key + CSR generated on ${fqdn}"
-
-    # ------------------------------------------------------------------
-    # STEP 4: Copy key and CSR back to CM host
-    # ------------------------------------------------------------------
-    info "  Copying files back to CM host..."
-    mkdir -p "${host_dir}"
-    chmod 700 "${host_dir}"
-    scp -q ${SSH_OPTS} "${SSH_USER}@${fqdn}:${remote_key}" "${local_key}"
-    scp -q ${SSH_OPTS} "${SSH_USER}@${fqdn}:${remote_csr}" "${local_csr}"
-    chmod 600 "${local_key}"
-    chmod 644 "${local_csr}"
-    ok "  Key : ${local_key}"
-    ok "  CSR : ${local_csr}"
-
-    # ------------------------------------------------------------------
-    # STEP 5: Clean up remote host
-    # ------------------------------------------------------------------
-    info "  Cleaning up remote host..."
-    ssh ${SSH_OPTS} "${SSH_USER}@${fqdn}" "rm -rf ${REMOTE_TMP}"
-    ok "  Remote cleanup done"
-
-    # ------------------------------------------------------------------
-    # STEP 6: Verify CSR locally
-    # ------------------------------------------------------------------
+    # Verify
     info "  Verifying CSR..."
     local csr_subject
-    csr_subject=$(openssl req -in "${local_csr}" -noout -subject 2>/dev/null)
+    csr_subject=$(openssl req -in "${csr_file}" -noout -subject 2>/dev/null)
     info "    Subject : ${csr_subject}"
-    local csr_san_line
-    csr_san_line=$(openssl req -in "${local_csr}" -noout -text 2>/dev/null \
-                  | grep -A1 'Subject Alternative Name' \
-                  | tail -1 \
-                  | sed 's/^[[:space:]]*//' || true)
-    if [[ -n "${csr_san_line}" ]]; then
-        ok "    SANs    : ${csr_san_line}"
+
+    local san_line
+    san_line=$(openssl req -in "${csr_file}" -noout -text 2>/dev/null \
+               | grep -A1 'Subject Alternative Name' | tail -1 \
+               | sed 's/^[[:space:]]*//' || true)
+    if [[ -n "${san_line}" ]]; then
+        ok "    SANs    : ${san_line}"
     else
-        warn "    SANs    : run manually: openssl req -in ${local_csr} -noout -text"
+        warn "    SANs not visible — verify: openssl req -in ${csr_file} -noout -text"
+    fi
+
+    local eku_line
+    eku_line=$(openssl req -in "${csr_file}" -noout -text 2>/dev/null \
+               | grep -A1 'Extended Key Usage' | tail -1 \
+               | sed 's/^[[:space:]]*//' || true)
+    if [[ -n "${eku_line}" ]]; then
+        ok "    EKU     : ${eku_line}"
     fi
 }
 
 
-#============================================================================
-# PROCESS INVENTORY FILE
+
+# =============================================================================
+# PROCESS HOSTS FILE
 # =============================================================================
 
-process_inventory_file() {
-    section "Processing inventory file: ${INVENTORY_FILE}"
+process_hosts_file() {
+    section "Processing hosts file: ${HOSTS_FILE}"
 
     local line_number=0
     local host_count=0
     local skip_count=0
     local error_count=0
 
-    # AFTER — inventory file on fd3, SSH cannot touch it
-    while IFS= read -r raw_line <&3; do
+    # fd3 prevents any subshell from consuming the hosts file via stdin
+    while IFS= read -r raw_line <&3 || [[ -n "${raw_line}" ]]; do
         line_number=$(( line_number + 1 ))
 
         if [[ -z "${raw_line//[[:space:]]/}" ]] || [[ "${raw_line}" =~ ^[[:space:]]*# ]]; then
@@ -392,27 +285,16 @@ process_inventory_file() {
             error_count=$(( error_count + 1 ))
         fi
 
-    done 3< "${INVENTORY_FILE}"
+    done 3< "${HOSTS_FILE}"
 
     echo ""
     section "Run Summary"
-    info "  Hosts attempted : ${host_count}"
+    info "  Hosts processed : ${host_count}"
     info "  Lines skipped   : ${skip_count} (blanks/comments)"
-
     if [[ ${error_count} -gt 0 ]]; then
         warn "  Parse errors    : ${error_count} — review lines above"
     else
         ok "  Parse errors    : 0"
-    fi
-
-    if [[ ${#FAILED_HOSTS[@]} -gt 0 ]]; then
-        warn "  SSH/gen failures: ${#FAILED_HOSTS[@]}"
-        for h in "${FAILED_HOSTS[@]}"; do
-            warn "    - ${h}"
-        done
-        warn "  Fix SSH on failed hosts then re-run — completed hosts will be skipped."
-    else
-        ok "  SSH/gen failures: 0"
     fi
 }
 
@@ -421,7 +303,7 @@ process_inventory_file() {
 # =============================================================================
 
 print_final_summary() {
-    section "Staged output under ${BASE_DIR}"
+    section "Output under ${BASE_DIR}"
     find "${BASE_DIR}" \( -name "*.pem" -o -name "*.csr" -o -name "key.pwd" \) \
         | sort \
         | while read -r f; do
@@ -429,14 +311,14 @@ print_final_summary() {
           done
 
     echo ""
-    echo -e "${BOLD}Next Steps — Cloudera Auto-TLS (existing certificates flow):${RESET}"
+    echo -e "${BOLD}Next Steps:${RESET}"
     echo "  1. Submit each <fqdn>.csr to your CA for signing."
-    echo "  2. Collect signed host certs + full CA chain."
-    echo "  3. Invoke CM Auto-TLS API: generateCmca then importAdminCredentials."
-    echo "  4. Restart CM and all managed services."
+    echo "  2. For Linux servers  : copy signed cert + key back to that server."
+    echo "  3. For Windows servers: import signed cert + key via Windows cert store."
+    echo "  4. For Cloudera nodes : proceed with Auto-TLS API activation."
     echo ""
     echo -e "${YELLOW}  Shared passphrase : ${KEY_PWD_FILE}${RESET}"
-    echo -e "${YELLOW}  Keep this safe — needed during CM API activation.${RESET}"
+    echo -e "${YELLOW}  Keep this safe — needed for all key operations.${RESET}"
     echo ""
 }
 
@@ -447,16 +329,18 @@ print_final_summary() {
 main() {
     echo ""
     echo -e "${BOLD}============================================================${RESET}"
-    echo -e "${BOLD}  Cloudera Auto-TLS — Per-Node CSR & Key Generation        ${RESET}"
-    echo -e "${BOLD}  Run from Cloudera Manager host with passwordless SSH        ${RESET}"
+    echo -e "${BOLD}  CSR & Key Generation — Local / On-Behalf-Of Mode        ${RESET}"
+    echo -e "${BOLD}  Run locally from any Linux host — no SSH required            ${RESET}"
     echo -e "${BOLD}============================================================${RESET}"
     echo ""
     validate_args "$@"
     check_prerequisites
     setup_key_password
-    process_inventory_file
+    process_hosts_file
     print_final_summary
 }
 
 main "$@"
+
+
 
