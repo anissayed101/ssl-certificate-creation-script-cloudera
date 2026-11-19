@@ -17,7 +17,7 @@
 #   fqdn|ip|extra_sans
 #
 #   Examples:
-#     cdp-master1.cloudera.bbi|192.168.113.131|
+#     server1.example.local|10.10.10.11|
 #     server2.example.local|10.10.10.12|
 #
 # OUTPUT:
@@ -38,7 +38,7 @@ set -euo pipefail
 CERT_C="AE"
 CERT_ST="Dubai"
 CERT_L="Dubai"
-CERT_O="BBI"
+CERT_O="Example Org"   # set to your organisation
 CERT_OU=""
 
 # 4096 for non-FIPS. FIPS clusters: use 2048 or 3072.
@@ -97,7 +97,7 @@ validate_args() {
         echo ""
         echo "  Format: fqdn|ip|extra_sans"
         echo "  Examples:"
-        echo "    cdp-master1.cloudera.bbi|192.168.113.131|"
+        echo "    server1.example.local|10.10.10.11|"
         echo "    server2.example.local|10.10.10.12|"
         exit 1
     fi
